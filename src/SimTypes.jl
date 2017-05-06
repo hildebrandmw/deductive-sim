@@ -4,107 +4,55 @@ using VerilogParser
 using DataStructures
 import Base: getindex, show
 
-export Netlist, simulate, getgate, getoutputs
+export Netlist, simulate, getgate, getoutputs, num_inputs, num_outputs
 #############################################
 ## Representation of Gate Equations in DNF ##
 #############################################
-immutable Literal
-   index    ::Int
-   inverted ::Bool
-end
-
-immutable DNF
-   dnf   ::Vector{Vector{Literal}}
-end
-
-function eval(dnf::DNF, logic::Vector{Bool})
-   or_value = false
-   for c in clauses(dnf)
-      and_value = true
-      for i in literals(c)
-         and_value &= logic[i.index] $ i.inverted
-      end
-      or_value |= and_value
-      or_value && return true
-   end
-   return false
-end
-
-function eval{T <: AbstractArray}(dnf::DNF, nodes::T)
-   or_value = false
-   for c in clauses(dnf)
-      and_value = true
-      for i in literals(c)
-         and_value &= nodes[i.index].value $ i.inverted
-      end
-      or_value |= and_value
-      or_value && return true
-   end
-   return false
+function eval{T <: AbstractArray}(equation::String, nodes::T)::Bool
+   return equation_dispatch[equation](nodes)
 end
 
 # DNF Conststructors
-function dnf_buf(n)
-   L = [Literal(1, false)]
-   dnf = DNF([L])
-   return dnf
-end
+eq_buf(nodes) = nodes[1].value
+eq_not(nodes) = ~nodes[1].value
 
-function dnf_not(n)
-   L = [Literal(1, true)]
-   dnf = DNF([L])
-   return dnf
+function eq_and(nodes)
+   for n in nodes
+      n.value == false && return false
+   end
+   return true
 end
+eq_nand(nodes) = ~eq_and(nodes)
 
-function dnf_and(n)
-   clause = [Literal(i, false) for i = 1:n]
-   dnf = DNF([clause])
-   return dnf
+function eq_or(nodes)
+   for n in nodes
+      n.value == true && return true
+   end
+   return false
 end
+eq_nor(nodes) = ~eq_or(nodes)
 
-function dnf_nand(n)
-   clauses = [[Literal(i, true)] for i = 1:n]
-   dnf = DNF(clauses)
-   return dnf
+function eq_xor(nodes)
+   val = false
+   for n in nodes
+      val $= n.value
+   end
+   return val
 end
+eq_xnor(nodes) = ~eq_xor(nodes)
 
-function dnf_or(n)
-   clauses = [[Literal(i, false)] for i = 1:n]
-   dnf = DNF(clauses)
-   return dnf
-end
-
-function dnf_nor(n)
-   clause = [Literal(i, true) for i = 1:n]
-   dnf = DNF([clause])
-   return dnf
-end
-
-function dnf_input(n)
-   return DNF([[Literal(0, false)]])
-end
-
-function dnf_output(n)
-   return DNF([[Literal(1, false)]])
-end
-
-const dnf_assignment = Dict{String, Function}(
-   "not"    => dnf_not,
-   "buf"    => dnf_buf,
-   "and"    => dnf_and,
-   "nand"   => dnf_nand,
-   "or"     => dnf_or,
-   "nor"    => dnf_nor,
-   "input"  => dnf_input,
-   "output" => dnf_output
+const equation_dispatch = Dict{String, Function}(
+   "not"    => eq_not,
+   "buf"    => eq_buf,
+   "and"    => eq_and,
+   "nand"   => eq_nand,
+   "or"     => eq_or,
+   "nor"    => eq_nor,
+   "xor"    => eq_xor,
+   "xnor"   => eq_xnor,
+   "input"  => eq_buf,
+   "output" => eq_buf
 )
-
-function assign_dnf(s::String, n::Integer)::DNF
-   return dnf_assignment[s](n)
-end
-
-clauses(dnf::DNF) = dnf.dnf
-literals(disjunction::Vector{Literal}) = disjunction
 
 ##########################
 ## Fault Representation ##
@@ -122,34 +70,21 @@ type Gate{T}
    index       ::Int64
    inputs      ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false}
    outputs     ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false}
-   equation    ::DNF
+   eval        ::Function
    initialized ::Bool
-   needs_update::Bool
-
 
    function Gate(
          name        ::String,
          index       ::Int64,
          inputs      ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false},
          outputs     ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false},
-         equation    ::DNF,
+         eval        ::Function,
       )
-      return new(name, index, inputs, outputs, equation, false, true)
+      return new(name, index, inputs, outputs, eval, false)
    end
    Gate(name::String) = new(name)
 end
 
-function show(g::Gate)
-   print("Gate: ", g.name, ". Inputs:")
-   for i in g.inputs
-      print(" ",i.name)
-   end
-   print(". Outputs: ")
-   for i in g.outputs
-      print(" ",i.name)
-   end
-   println("")
-end
 ####################
 ## Node Data Type ##
 ####################
@@ -182,9 +117,6 @@ type Node
       )
    end
 end
-
-getindex(a::SubArray{Node}, l::Literal) = a[l.index]
-
 
 #######################
 ## Top Level Netlist ##
@@ -234,8 +166,8 @@ function Netlist(file::String)
          outputs = view(nodes, Int64[])
       end
 
-      dnf = assign_dnf(netlist.gates[name], length(inputs))
-      gates[i] = Gate{Node}(name, i, inputs, outputs, dnf)
+      eval = equation_dispatch[netlist.gates[name]]
+      gates[i] = Gate{Node}(name, i, inputs, outputs, eval)
    end
 
    return Netlist(
@@ -248,8 +180,10 @@ function Netlist(file::String)
 end
 
 getgate(n::Netlist, name::String) = n.gates[n.gate_names[name]]
+num_inputs(n::Netlist) = length(n.gates[n.gate_names["input"]].outputs)
+num_outputs(n::Netlist) = length(n.gates[n.gate_names["output"]].inputs)
 
-function simulate(n::Netlist, values::Array{Bool}, pq)
+function simulate(n::Netlist, values::Vector{Bool}, pq)
 
    # Get Input Gate
    input_gate = n.gates[n.gate_names["input"]]
@@ -262,7 +196,7 @@ function simulate(n::Netlist, values::Array{Bool}, pq)
 
    while length(pq) != 0
       # Get Gate
-      @inbounds gate = n.gates[shift!(pq)]
+      gate = n.gates[shift!(pq)]
       processgate!(pq, gate)
    end
 
@@ -278,91 +212,28 @@ function processgate!(pq, g::Gate)
       g.initialized = true
    end
 
-   g.needs_update || return nothing
-
    # Process Gate
-   output_value = eval(g.equation, g.inputs)
-
+   output_value = g.eval(g.inputs)
    for i in g.outputs
       setnode!(pq, i, output_value)
    end
-
    return nothing
 end
 
 function setnode!(pq, n::Node, value::Bool)
-
    if n.initialized && n.value == value
       return nothing
    end
 
    n.value = value
    n.initialized = true
+
    for gate in n.sink
       push!(pq, gate.index)
-      gate.needs_update = true
    end
    return nothing
 end
 
-function getoutputs(n::Netlist)
-   # Get Output Gate
-   output_gate = n.gates[n.gate_names["output"]]
-   return [node.value for node in output_gate.inputs]
-end
-
-### Methods
-function propogate(dnf::DNF, nodes::SubArray{Node})
-   faults = Set{Int64}()
-
-   or_intersection_list       = Set{Int64}()
-   or_union_list              = Set{Int64}()
-   or_controlling_set_empty   = true
-
-   # Process Clauses
-   for c in clauses(dnf)
-      and_intersection_list = Set{Int64}()
-      and_union_list        = Set{Int64}()
-      and_controlling_set_empty  = true
-      logic_for_and              = true
-
-      # Process each literal in the clause
-      for l in literals(c)
-         node = nodes[l]
-         logic_for_and &= (node.value $ l.inverted)
-         if length(node.fault_list) == 0
-            if !node.value
-               and_intersection_list = Set{Int64}()
-               and_controlling_set_empty = false
-            end
-         else
-            if node.value
-               add_union_list = node.fault_list
-            else
-               intersect!(add_intersection_list, node.fault_list)
-               and_controlling_set_empty = false
-            end
-         end
-      end
-
-
-      if and_controlling_set_empty
-         temp_fault_list = add_union_list
-      else
-         setdiff!(add_intersection_list, add_union_list)
-         temp_fault_list = add_intersection_list
-      end
-
-      if logic_for_and
-         intersect!(or_intersection_list, temp_fault_list)
-         or_controlling_set_empty = false
-      else
-         or_union_list = temp_fault_list
-      end
-   end
-
-   return or_controlling_set_empty ? or_union_list : setdiff(or_intersection_list, or_union_list)
-end
-
+getoutputs(n::Netlist) = [node.value for node in getgate(n, "output").inputs]
 
 end

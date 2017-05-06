@@ -18,7 +18,9 @@ const recognized_gates = Set([
    "nand",
    "and",
    "or",
-   "nor"])
+   "nor",
+   "xor",
+   "xnor"])
 
 function update_dict!{K,T}(d::Dict{K, T}, k, v...)
    # Initialize if key does not exist in dictionary

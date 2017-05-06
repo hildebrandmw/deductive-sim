@@ -160,8 +160,8 @@ function verify_netlist()
       println("")
       println("Testing: ", n.name)
       passed = true
-      for (istring, ostring) in zip(eachline(infile), eachline(outfile))
 
+      for (istring, ostring) in zip(eachline(infile), eachline(outfile))
          input =  [tf(c) for c in strip(istring)[end:-1:1]]
          output = [tf(c) for c in strip(ostring)[end:-1:1]]
 
