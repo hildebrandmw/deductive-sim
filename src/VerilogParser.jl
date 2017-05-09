@@ -1,7 +1,7 @@
 module VerilogParser
 
 export NetlistStrings, readnetlist
-immutable NetlistStrings
+struct NetlistStrings
    name        ::String
    nodes       ::Set{String}
    gates       ::Dict{String, String}
@@ -10,6 +10,7 @@ immutable NetlistStrings
    gate_inputs ::Dict{String, Vector{String}}
    gate_outputs::Dict{String, Vector{String}}
 end
+
 const recognized_gates = Set([
    "input",
    "output",
@@ -22,19 +23,20 @@ const recognized_gates = Set([
    "xor",
    "xnor"])
 
-function update_dict!{K,T}(d::Dict{K, T}, k, v...)
+function add_dict!{K,T}(d::Dict{K, T}, k, v...)
    # Initialize if key does not exist in dictionary
-   if haskey(d, k)
-      push!(d[k], v[1])
-   else
-      d[k] = T([v[1]])
-   end
+   haskey(d, k) ? push!(d[k], v[1]) : d[k] = T([v[1]])
 
    # No more need to test, just push
    for i = 2:length(v)
       push!(d[k], v[i])
    end
 
+   return nothing
+end
+
+function replace!{K,T}(d::Dict{K,T}, k, v)
+   d[k] = T([v])
    return nothing
 end
 
@@ -99,11 +101,11 @@ function readnetlist(file::String)
 
             # Create input gate in gate strings
             gates["input"] = "input"
-            update_dict!(gate_outputs, "input", nets...)
+            add_dict!(gate_outputs, "input", nets...)
 
             # Set sources for all input nodes
             for n in nets
-               update_dict!(node_sources, n,"input")
+               add_dict!(node_sources, n,"input")
             end
          elseif keyword == "output"
             net_string = strip(ln[length("output")+1:end-1])
@@ -114,11 +116,11 @@ function readnetlist(file::String)
             end
 
             gates["output"] = "output"
-            update_dict!(gate_inputs, "output", nets...)
+            add_dict!(gate_inputs, "output", nets...)
 
             # Set sink for all output nodes
             for n in nets
-               update_dict!(node_sinks, n, "output")
+               add_dict!(node_sinks, n, "output")
             end
          else
             instance_id = match(r"(?<=\s)\w*(?=(\s|\())", ln).match
@@ -128,18 +130,20 @@ function readnetlist(file::String)
 
             gates[instance_id] = keyword
 
-            update_dict!(gate_outputs, instance_id, nets[1])
-            update_dict!(gate_inputs, instance_id, nets[2:end]...)
+            add_dict!(gate_outputs, instance_id, nets[1])
+            add_dict!(gate_inputs, instance_id, nets[2:end]...)
 
-            update_dict!(node_sources, nets[1], instance_id)
+            add_dict!(node_sources, nets[1], instance_id)
             for i = 2:length(nets)
-               update_dict!(node_sinks, nets[i], instance_id)
+               add_dict!(node_sinks, nets[i], instance_id)
             end
          end
          push!(nodes, nets...)
       end
    end
    close(f)
+
+   process_fanouts(nodes, gates, node_sources, node_sinks, gate_inputs, gate_outputs)
 
    return NetlistStrings(
       name,
@@ -150,8 +154,56 @@ function readnetlist(file::String)
       gate_inputs,
       gate_outputs,
    )
+end
 
+function process_fanouts(
+         nodes,
+         gates,
+         node_sources,
+         node_sinks,
+         gate_inputs,
+         gate_outputs
+      )
 
+      #=
+      Search for nodes with fanouts. Replace nodes with a fanout gate and generate
+      a bunch of new nodes while maintaining netlist nintegrity.
+      =#
+
+      # Copy so we can push elements to "nodes" without screwing up the iterator
+      node_names = copy(nodes)
+
+      fanout_count = 0
+
+      for node in node_names
+         # Check for fanout
+         if length(node_sinks[node]) > 1
+            # Create Fanout Gate
+            fanout_gate_name = "FAN" * string(fanout_count)
+            gates[fanout_gate_name] = "fanout"
+
+            for (branch, sink_gate_name) in enumerate(node_sinks[node])
+               new_node_name = node * ".b" * string(branch)
+               push!(nodes, new_node_name)
+               # Set New Node source and sink
+               add_dict!(node_sources, new_node_name, fanout_gate_name)
+               add_dict!(node_sinks,   new_node_name, sink_gate_name)
+
+               # Assign new node to the output of the fanout gate
+               add_dict!(gate_outputs, fanout_gate_name, new_node_name)
+
+               # Delete original node form sink gate input and add new node
+               index = findfirst(gate_inputs[sink_gate_name], node)
+               gate_inputs[sink_gate_name][index] = new_node_name
+            end
+
+            # Finish by assigning fanout gate input and node sink for original node
+            replace!(node_sinks, node, fanout_gate_name)
+            add_dict!(gate_inputs, fanout_gate_name, node)
+         end
+         fanout_count += 1
+      end
+      return nothing
 end
 
 

@@ -12,7 +12,7 @@ over the input vectors and ensuring that the outputs match the Modelsim results
 =#
 module NetlistTester
 
-using SimTypes
+using Simulator
 using DataStructures
 
 export verify_netlist
@@ -65,7 +65,10 @@ function generate_random_inputs(n::Netlist, max_vectors::Int64)
    else
       num_vectors = max_vectors
       for i = 1:max_vectors
-         println(f, join([rand(["0","1"]) for j = 1:num_inputs]))
+         seed = rand(Bool, num_inputs)
+         println(f, join([j ? "0": "1" for j = seed]))
+         k = rand(1:length(seed))
+         seed[k] = ~seed[k]
       end
    end
    close(f)
@@ -170,10 +173,11 @@ function verify_netlist()
 
          if output != generated_output
             println("Circuit failed for: ", input)
-            println("Expected Output: ", output)
-            println("Generated Output: ", generated_output)
-            println("")
+            #println("Expected Output: ", output)
+            #println("Generated Output: ", generated_output)
+            #println("")
             passed = false
+            break
          end
       end
 
@@ -183,9 +187,6 @@ function verify_netlist()
       close(outfile)
    end
 end
-
-
-
 
 
 end#module

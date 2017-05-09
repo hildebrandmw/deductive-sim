@@ -3,13 +3,17 @@
 @time output_values(n)
 
 using DataStructues
-@time x = readnetlist("circuits/c17.v")
+@time x = readnetlist("circuits/paper_test.v")
+length(x.nodes)
+@time n = Netlist("circuits/paper_test.v");
+list_faults(n)
+n.faults
 
-@time n = Netlist("circuits/c17.v")
+length(n.faults)
 pq = CircularDeque{Int64}(2 * length(n.gates))
 @time simulate(n, [true, true, true, true, true], pq)
 println(getoutputs(n))
 
-generate_tests(500)
+generate_tests(1000)
 clean_netlist_verification()
 @time verify_netlist()
