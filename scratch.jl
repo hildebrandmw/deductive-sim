@@ -5,15 +5,15 @@
 using DataStructues
 @time x = readnetlist("circuits/paper_test.v")
 length(x.nodes)
-@time n = Netlist("circuits/paper_test.v");
+
+
+@time n = Netlist("circuits/test_and.v");
 list_faults(n)
-n.faults
+@time simulate(n, [true, false])
+getnode(n, "N3")
 
-length(n.faults)
-pq = CircularDeque{Int64}(2 * length(n.gates))
-@time simulate(n, [true, true, true, true, true], pq)
-println(getoutputs(n))
 
-generate_tests(1000)
+pwd()
+generate_tests(5000)
 clean_netlist_verification()
 @time verify_netlist()

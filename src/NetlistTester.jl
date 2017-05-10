@@ -45,6 +45,7 @@ function generate_tests(max_vectors::Int64)
          testbench_name = " testbenches/" * n.name * "_tb.v"
          nc = nc_command * testbench_name * circuit_name
          println(makefile, "\t", nc)
+         println(makdefule, "\trm -rf INCA_libs")
       end
    end
 
@@ -64,8 +65,8 @@ function generate_random_inputs(n::Netlist, max_vectors::Int64)
       end
    else
       num_vectors = max_vectors
+      seed = rand(Bool, num_inputs)
       for i = 1:max_vectors
-         seed = rand(Bool, num_inputs)
          println(f, join([j ? "0": "1" for j = seed]))
          k = rand(1:length(seed))
          seed[k] = ~seed[k]
@@ -156,7 +157,6 @@ function verify_netlist()
    for (root, ~, files) in walkdir("test/netlist-verification/circuits"), file in files
       source_file = joinpath(root, file)
       n = Netlist(source_file)
-      pq = CircularDeque{Int64}(2 * length(n.gates))
 
       infile = open("test/netlist-verification/input_vectors/" * n.name * ".txt", "r")
       outfile = open("test/netlist-verification/output_vectors/" * n.name * ".txt", "r")
@@ -168,14 +168,11 @@ function verify_netlist()
          input =  [tf(c) for c in strip(istring)[end:-1:1]]
          output = [tf(c) for c in strip(ostring)[end:-1:1]]
 
-         simulate(n, input, pq)
+         simulate(n, input)
          generated_output = getoutputs(n)
 
          if output != generated_output
             println("Circuit failed for: ", input)
-            #println("Expected Output: ", output)
-            #println("Generated Output: ", generated_output)
-            #println("")
             passed = false
             break
          end

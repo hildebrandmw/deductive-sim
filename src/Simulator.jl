@@ -4,8 +4,16 @@ using VerilogParser
 using DataStructures
 import Base: getindex, show
 
-export Netlist, simulate, getgate, getoutputs, num_inputs, num_outputs,
+export Netlist, simulate, getgate, getnode, getoutputs, num_inputs, num_outputs,
    list_faults
+
+###################################
+## Like Subarrays, but different ##
+###################################
+
+
+
+
 #############################################
 ## Representation of Gate Equations in DNF ##
 #############################################
@@ -23,9 +31,9 @@ function eq_and(nodes)
    end
    return true
 end
-eq_nand(nodes) = ~eq_and(nodes)
+ eq_nand(nodes) = ~eq_and(nodes)
 
-function eq_or(nodes)
+ function eq_or(nodes)
    for n in nodes
       n.value == true && return true
    end
@@ -76,6 +84,7 @@ mutable struct Gate{T}
    inputs      ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false}
    outputs     ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false}
    eval        ::Function
+   propogate   ::Function
    initialized ::Bool
 
    function Gate{T}(
@@ -84,8 +93,9 @@ mutable struct Gate{T}
          inputs      ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false},
          outputs     ::SubArray{T,1,Array{T,1},Tuple{Array{Int64,1}},false},
          eval        ::Function,
+         propogate   ::Function,
       ) where T
-      return new(name, index, inputs, outputs, eval, false)
+      return new(name, index, inputs, outputs, eval, propogate, false)
    end
    Gate{T}(name::String) where T = new(name)
 end
@@ -164,18 +174,24 @@ const fault_dispatch = Dict{String, Function}(
 #################################
 ## Fault Propogation Operators ##
 #################################
+function initialize_fault_lists(nodes)
+   for n in nodes
+      if n.value
+         n.fault_list = Set([n.stuck_at_zero])
+      else
+         n.fault_list = Set([n.stuck_at_one])
+      end
+   end
+   return nothing
+end
+
 function fp_to_outputs(g::Gate, fl::Set{Int64})
    for n in g.outputs
       if n.value
-         n.fault_list = union(fl, n.stuck_at_zero)
+         n.fault_list = union(fl, Set([n.stuck_at_zero]))
       else
-         n.fault_list = union(fl, n.stuck_at_one)
+         n.fault_list = union(fl, Set([n.stuck_at_one]))
       end
-   end
-
-   # Clear Input fault lists. We can do this because no fanout
-   for n in g.inputs
-      n.fault_list = Set{Int64}()
    end
    return nothing
 end
@@ -186,7 +202,8 @@ function fp(g::Gate,controlling_logic::Bool,critical_logic::Bool)
       for n in g.inputs
          union!(union_list, n.fault_list)
       end
-      return union_list
+      fp_to_outputs(g, union_list)
+      return nothing
    end
 
    intersect_list = Set{Int64}()
@@ -197,7 +214,7 @@ function fp(g::Gate,controlling_logic::Bool,critical_logic::Bool)
          union!(union_list, n.fault_list)
       else
          if intersect_initialized
-            intersect!(intersect_list, n.fault_list)
+            intersect_list = intersect(intersect_list, n.fault_list)
          else
             intersect_list = n.fault_list
             intersect_initialized = true
@@ -205,7 +222,9 @@ function fp(g::Gate,controlling_logic::Bool,critical_logic::Bool)
       end
    end
 
-   return fp_to_outputs(g, setdiff(intersect_list, union_list))
+   fp_to_outputs(g, setdiff(intersect_list, union_list))
+
+   return nothing
 end
 
 fp_and(g::Gate)   = fp(g, false, true)
@@ -222,11 +241,31 @@ function fp_buf(g::Gate)
    return nothing
 end
 
-function fp_output(g::Gate) = return nothing
+fp_output(g::Gate) = return nothing
+fp_input(g::Gate) = fp_to_outputs(g, Set{Int64}())
+fp_fanout(g::Gate) = fp_to_outputs(g, g.inputs[1].fault_list)
 
+function fp_xor(g::Gate)
+   fl1 = g.inputs[1].fault_list
+   fl2 = g.inputs[2].fault_list
+   fl = setdiff(union(fl1, fl2), intersect(fl1, fl2))
+   fp_to_outputs(g, fl)
+   return nothing
+end
 
-
-
+const fault_prop_dispatch = Dict{String, Function}(
+   "not"    => fp_buf,
+   "buf"    => fp_buf,
+   "and"    => fp_and,
+   "nand"   => fp_nand,
+   "or"     => fp_or,
+   "nor"    => fp_nor,
+   "xor"    => fp_xor,
+   "xnor"   => fp_xor,
+   "input"  => fp_input,
+   "output" => fp_output,
+   "fanout" => fp_fanout,
+)
 
 
 #######################
@@ -236,6 +275,8 @@ type Netlist
    name        ::String
    gates       ::Vector{Gate{Node}}
    gate_names  ::Dict{String, Int64}
+   pq          ::CircularDeque{Int64}
+   is_queued   ::Vector{Bool}
    nodes       ::Vector{Node}
    node_names  ::Dict{String, Int64}
    faults      ::Vector{Fault}
@@ -250,6 +291,8 @@ function Netlist(file::String)
    gates = [Gate{Node}(i) for i in keys(netlist.gates)]
    gate_names = Dict(b.name=>a for (a,b) in enumerate(gates))
 
+   pq = CircularDeque{Int64}(length(gates))
+   is_queued = zeros(Bool, length(gates))
    # Initialize Space
    nodes = [Node() for i = 1:length(netlist.nodes)]
    node_names = Dict{String, Int64}()
@@ -278,7 +321,9 @@ function Netlist(file::String)
       end
 
       eval = equation_dispatch[netlist.gates[name]]
-      gates[i] = Gate{Node}(name, i, inputs, outputs, eval)
+
+      prop = fault_prop_dispatch[netlist.gates[name]]
+      gates[i] = Gate{Node}(name, i, inputs, outputs, eval, prop)
 
       fc(gates[i], netlist.gates[name])
    end
@@ -301,6 +346,8 @@ function Netlist(file::String)
       netlist_name,
       gates,
       gate_names,
+      pq,
+      is_queued,
       nodes,
       node_names,
       faults
@@ -315,30 +362,46 @@ function list_faults(n::Netlist)
 end
 
 getgate(n::Netlist, name::String) = n.gates[n.gate_names[name]]
+getnode(n::Netlist, name::String) = n.nodes[n.node_names[name]]
 num_inputs(n::Netlist) = length(n.gates[n.gate_names["input"]].outputs)
 num_outputs(n::Netlist) = length(n.gates[n.gate_names["output"]].inputs)
 
-function simulate(n::Netlist, values::Vector{Bool}, pq)
+function simulate(n::Netlist, values::Vector{Bool})
 
+   pq = n.pq
    # Get Input Gate
    input_gate = n.gates[n.gate_names["input"]]
 
    # Iterate through output nodes of the gate, setting values
    # THis assumes values are in order!
-   for (value, node) in zip(values, input_gate.outputs)
-      setnode!(pq, node, value)
+
+   if length(values) == length(input_gate.outputs)
+      for i = 1:length(values)
+         setnode!(n, input_gate.outputs[i], values[i])
+      end
+   else
+      error("Wrong Number of Inputs")
    end
+   #=
+   for (value, node) in zip(values, input_gate.outputs)
+      setnode!(n, node, value)
+   end
+   =#
+   #initialize_fault_lists(input_gate.outputs)
 
    while length(pq) != 0
       # Get Gate
-      gate = n.gates[shift!(pq)]
-      processgate!(pq, gate)
+      gate_index = shift!(pq)
+      gate = n.gates[gate_index]
+      n.is_queued[gate_index] = false
+
+      processgate!(n, gate)
    end
 
    return n
 end
 
-function processgate!(pq, g::Gate)
+function processgate!(n::Netlist, g::Gate)
    # Make sure all inputs are initialized
    if !g.initialized
       for node in g.inputs
@@ -350,12 +413,15 @@ function processgate!(pq, g::Gate)
    # Process Gate
    output_value = g.eval(g.inputs)
    for i in g.outputs
-      setnode!(pq, i, output_value)
+      setnode!(n, i, output_value)
    end
+   # Perform fault propogation
+   #g.propogate(g)
+
    return nothing
 end
 
-function setnode!(pq, n::Node, value::Bool)
+function setnode!(netlist::Netlist, n::Node, value::Bool)
    if n.initialized && n.value == value
       return nothing
    end
@@ -364,7 +430,10 @@ function setnode!(pq, n::Node, value::Bool)
    n.initialized = true
 
    for gate in n.sink
-      push!(pq, gate.index)
+      if !netlist.is_queued[gate.index]
+         push!(netlist.pq, gate.index)
+         netlist.is_queued[gate.index] = true
+      end
    end
    return nothing
 end
