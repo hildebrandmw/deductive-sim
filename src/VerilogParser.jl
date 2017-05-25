@@ -1,3 +1,14 @@
+#=
+DISCLAIMER: I make no pretense that this thing is optimal or in anyway good.
+
+It parses simple verilog with reckless abandon and is about as simple as you can
+make something that kind of works.
+
+Any reasonable implementation of this simulator would need a much better parser.
+
+I just wanted to make something that works.
+=#
+
 module VerilogParser
 
 export NetlistStrings, readnetlist
@@ -28,9 +39,7 @@ function add_dict!{K,T}(d::Dict{K, T}, k, v...)
    haskey(d, k) ? push!(d[k], v[1]) : d[k] = T([v[1]])
 
    # No more need to test, just push
-   for i = 2:length(v)
-      push!(d[k], v[i])
-   end
+   for i = 2:length(v); push!(d[k], v[i]); end
 
    return nothing
 end

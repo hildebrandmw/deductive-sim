@@ -17,9 +17,9 @@ using DataStructures
 
 export verify_netlist
 
-function generate_tests(max_vectors::Int64)
+function generate_tests(max_vectors::Int64; pure = false)
    # Creage makefile for automating testing
-   makefile = open("test/netlist-verification/Makefile", "w")
+   makefile = open("test/test-suite/Makefile", "w")
 
    nc_command = "ncverilog +sv +access+rw +nctimescale+1ns/1ns"
    println(makefile, "run:")
@@ -27,7 +27,7 @@ function generate_tests(max_vectors::Int64)
    for (root,~,files) in walkdir("circuits"), file in files
       if file[end-1:end] == ".v"
          source_file = joinpath(root, file)
-         dest_file = joinpath("test/netlist-verification/circuits", file)
+         dest_file = joinpath("test/test-suite/circuits", file)
 
          # Copy circuit into testing sub-directory
          cp(source_file, dest_file, remove_destination = true)
@@ -36,7 +36,7 @@ function generate_tests(max_vectors::Int64)
          n = Netlist(source_file)
 
          # Generate Input Vectors
-         num_vectors = generate_random_inputs(n, max_vectors)
+         num_vectors = generate_random_inputs(n, max_vectors, pure)
 
          # Generate Testbench
          generate_testbench(n, num_vectors)
@@ -55,9 +55,9 @@ function generate_tests(max_vectors::Int64)
 end
 
 
-function generate_random_inputs(n::Netlist, max_vectors::Int64)
+function generate_random_inputs(n::Netlist, max_vectors::Int64, pure::Bool)
    circuit = n.name
-   f = open("test/netlist-verification/input_vectors/" * circuit * ".txt", "w")
+   f = open("test/test-suite/input_vectors/" * circuit * ".txt", "w")
    num_inputs = length(getgate(n, "input").outputs)
    if num_inputs < log2(max_vectors)
       num_vectors = 2 ^ num_inputs
@@ -69,8 +69,12 @@ function generate_random_inputs(n::Netlist, max_vectors::Int64)
       seed = rand(Bool, num_inputs)
       for i = 1:max_vectors
          println(f, join([j ? "0": "1" for j = seed]))
-         k = rand(1:length(seed))
-         seed[k] = ~seed[k]
+         if pure
+            seed = rand(Bool, num_inputs)
+         else
+            k = rand(1:length(seed))
+            seed[k] = ~seed[k]
+         end
       end
    end
    close(f)
@@ -86,7 +90,7 @@ function generate_testbench(n::Netlist, num_vectors::Int64)
    num_inputs  = length(inputs)
    num_outputs = length(outputs)
 
-   f = open("test/netlist-verification/testbenches/" * testbench_name * ".v", "w")
+   f = open("test/test-suite/testbenches/" * testbench_name * ".v", "w")
 
    println(f, "module " * testbench_name * "();")
    println(f, "parameter INPUT_WIDTH = ", num_inputs, ";")
@@ -141,12 +145,12 @@ end
 
 function clean_netlist_verification()
    println("Removing the following files:")
-   for (root, ~, files) in walkdir("test/netlist-verification"), file in files
+   for (root, ~, files) in walkdir("test/test-suite"), file in files
       println(joinpath(root, file))
       rm(joinpath(root, file))
    end
 
-   INCA_dir = "test/netlist-verification/INCA_libs"
+   INCA_dir = "test/test-suite/INCA_libs"
    if isdir(INCA_dir)
       rm(INCA_dir, recursive = true)
    end
@@ -154,15 +158,22 @@ end
 
 tf(c::Char) = (c == '1') ? true : false
 
-function verify_netlist()
-   for (root, ~, files) in walkdir("test/netlist-verification/circuits"), file in files
+function verify_netlist(
+   directory::String;
+   fault_simulation  = true,
+   fault_collapsing  = true,
+   use_queuing       = false,
+   check_results     = true,
+   )
+
+   number_of_faults_found = Float64[]
+   for (root, ~, files) in walkdir(joinpath("test",directory, "circuits")), file in files
       #file == "mux.v" || continue
       source_file = joinpath(root, file)
-      n = Netlist(source_file)
+      n = Netlist(source_file, fault_collapsing = fault_collapsing)
 
-      infile = open("test/netlist-verification/input_vectors/" * n.name * ".txt", "r")
-      outfile = open("test/netlist-verification/output_vectors/" * n.name * ".txt", "r")
-
+      infile = open(joinpath("test",directory, "input_vectors", n.name * ".txt"), "r")
+      outfile = open(joinpath("test",directory, "output_vectors", n.name * ".txt"), "r")
 
 
       input_vectors = Vector{Vector{Bool}}()
@@ -184,133 +195,43 @@ function verify_netlist()
       println("Number of Vectors: ", length(input_vectors))
       passed = true
       # Create Test Vectors
-
-      @time for i = 1:length(input_vectors)
+      gates_processed = 0
+      ~, t, ~  = @timed for i = 1:length(input_vectors)
          input =  input_vectors[i]
          output = output_vectors[i]
 
-         simulate(n, input, fault_simulation = true)
+         ~, gp = simulate(n, input,
+            fault_simulation  = fault_simulation,
+            use_queuing      = use_queuing,
+         )
+
+         gates_processed += gp
+
+         if check_results
+            generated_output = getoutputs(n)
 
 
-         generated_output = getoutputs(n)
-
-
-         if output != generated_output
-            println("Circuit failed for: ", input)
-            passed = false
-            break
+            if output != generated_output
+               println("Circuit failed for: ", input)
+               passed = false
+               break
+            end
          end
       end
-      println("Faults Detected: ", sum(n.fault_detected))
-      passed && println("Circuit passed simulation test.")
+      println("Fault Coverage: ", sum(n.fault_detected) / length(n.faults))
+      println("Gates Processed per second: ", gates_processed/t)
+      push!(number_of_faults_found, sum(n.fault_detected) / length(n.faults))
+
+      passed && check_results && println("Circuit passed simulation test.")
 
       close(infile)
       close(outfile)
 
    end
+   return number_of_faults_found
 end
 
 
-######################################
-# VERIFICATION FOR FAULT PROPOGATION #
-######################################
-const test_circuits = [
-   "test_not.v",
-   "test_and.v",
-   "test_nand.v",
-   "test_or.v",
-   #"test_nor.v"
-]
-
-const expected_faultlist = Dict(
-   "test_not.v"   => [Fault("N2", true), Fault("N2", false)],
-   "test_and.v"   => [Fault("N2", true), Fault("N1", true), Fault("N3", false)],
-   "test_nand.v"  => [Fault("N2", true), Fault("N1", true), Fault("N3", true)],
-   "test_or.v"    => [Fault("N2", false), Fault("N1", false), Fault("N3", true)],
-   "test_nor.v"   => [Fault("N2", false), Fault("N1", false), Fault("N3", false)],
-)
-
-
-const input_vectors = Dict(
-   "test_not.v"   => [[false],[true]],
-   "test_and.v"   => [[false, false], [false, true], [true, false], [true, true]],
-   "test_nand.v"  => [[false, false], [false, true], [true, false], [true, true]],
-   "test_or.v"    => [[false, false], [false, true], [true, false], [true, true]],
-   "test_nor.v"   => [[false, false], [false, true], [true, false], [true, true]],
-)
-
-const faults_detected_by = Dict(
-   "test_not.v" => [
-      [Fault("N2", false)],
-      [Fault("N2", true)]
-   ],
-   "test_and.v" => [
-      Fault[],
-      [Fault("N1", true)],
-      [Fault("N2", true)],
-      [Fault("N3", false)]
-   ],
-   "test_nand.v" => [
-      Fault[],
-      [Fault("N1", true)],
-      [Fault("N2", true)],
-      [Fault("N3", true)]
-   ],
-   "test_or.v" => [
-      [Fault("N3", true)],
-      [Fault("N2", false)],
-      [Fault("N1", false)],
-      Fault[]
-   ],
-)
-function test_faults()
-   for circuit in test_circuits
-      n = Netlist("test/netlist-verification/circuits/" * circuit)
-
-      println("")
-      println("Checking: ", circuit)
-
-      expected_faults = expected_faultlist[circuit]
-      if issubset(n.faults, expected_faults) && issubset(expected_faults, n.faults)
-         println("Fault Lists Correct")
-      else
-         println("Fault Lists Incorrect")
-         println("Faults Found: ", n.faults)
-         println("Faults Expected: ", expected_faults)
-      end
-
-      was_error = false
-
-      for (vector, faults_detected) in zip(input_vectors[circuit], faults_detected_by[circuit])
-         simulate(n, vector, fault_simulation = true)
-         count = 0
-         for (i, b) in enumerate(n.fault_detected)
-            if b
-               f = n.faults[i]
-               if !in(f, faults_detected)
-                  println("Unexpected Fault: ", f, " for input ", vector)
-                  was_error = true
-               else
-                  count += 1
-               end
-            end
-         end
-         if (count != length(faults_detected))
-            println("Warning. Not enough faults found!")
-            was_error = true
-         end
-
-         reset_faults!(n)
-      end
-
-      if !was_error
-         println("Circuit passed fault examination.")
-      else
-         println("Circuit did not pass fault examination.")
-      end
-
-   end
-end
 
 
 end#module
