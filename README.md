@@ -3,6 +3,8 @@ Final Project for EEC283
 
 Main source code is found in "src/simulator.jl".
 
+Source for set functions optimized for sorted arrays is in "src/SortedOpts.jl".
+
 Circuits can be found in the "circuits" directory while test vectors used
 to obtain results are found in the "tests" directory.
 
